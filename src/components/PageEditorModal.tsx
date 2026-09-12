@@ -31,6 +31,8 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
   const [base, setBase] = useState<{ url: string; width: number; height: number } | null>(null)
   const [textItems, setTextItems] = useState<PageTextItem[]>([])
   const [annotations, setLocalAnnotations] = useState<Annotation[]>(page?.annotations ?? [])
+  const [undoStack, setUndoStack] = useState<Annotation[][]>([])
+  const [redoStack, setRedoStack] = useState<Annotation[][]>([])
   const [tool, setTool] = useState<Tool>('select')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [pendingStrokes, setPendingStrokes] = useState<{ x: number; y: number }[][]>([])
@@ -102,6 +104,33 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
 
   if (!page) return null
 
+  /** Snapshots the current state onto the undo stack — call once per logical action (not per
+   *  pixel of a drag or per keystroke), right before that action changes `annotations`. */
+  function pushUndo() {
+    setUndoStack((u) => [...u, annotations])
+    setRedoStack([])
+  }
+
+  function undo() {
+    if (undoStack.length === 0) return
+    const prevState = undoStack[undoStack.length - 1]
+    setRedoStack((r) => [...r, annotations])
+    setUndoStack((u) => u.slice(0, -1))
+    setLocalAnnotations(prevState)
+    setSelectedId(null)
+    setEditingTextId(null)
+  }
+
+  function redo() {
+    if (redoStack.length === 0) return
+    const nextState = redoStack[redoStack.length - 1]
+    setUndoStack((u) => [...u, annotations])
+    setRedoStack((r) => r.slice(0, -1))
+    setLocalAnnotations(nextState)
+    setSelectedId(null)
+    setEditingTextId(null)
+  }
+
   function fractionFromEvent(e: React.PointerEvent) {
     const rect = containerRef.current!.getBoundingClientRect()
     return {
@@ -128,6 +157,7 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
   }
 
   function coverAndEditText(item: PageTextItem) {
+    pushUndo()
     const pad = 0.004
     const rectAnn: AnnotationRect = {
       id: uid(),
@@ -164,6 +194,7 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
     }
     if (tool === 'text') {
       const { x, y } = fractionFromEvent(e)
+      pushUndo()
       const newAnn: AnnotationText = { id: uid(), type: 'text', xPct: x, yPct: y, text: '', sizePct: 0.035, color: textColor }
       setLocalAnnotations((prev) => [...prev, newAnn])
       pendingCoverRectId.current = null
@@ -211,6 +242,7 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
       setTool('select')
       return
     }
+    pushUndo()
     const newAnn: Annotation = { id: uid(), type: 'ink', strokes: pendingStrokes, color: inkColor, widthPct: inkWidthPct }
     setLocalAnnotations((prev) => [...prev, newAnn])
     setPendingStrokes([])
@@ -222,6 +254,7 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
   }
 
   function deleteAnnotation(id: string) {
+    pushUndo()
     setLocalAnnotations((prev) => prev.filter((a) => a.id !== id))
     if (selectedId === id) setSelectedId(null)
   }
@@ -231,6 +264,7 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
   }
 
   function handleSignatureConfirm(bytes: Uint8Array, aspect: number) {
+    pushUndo()
     const w = 0.35
     const h = w / aspect
     const newAnn: AnnotationImage = {
@@ -262,7 +296,24 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
         <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-sm font-medium text-slate-300 active:bg-slate-800">
           Cancel
         </button>
-        <span className="text-sm font-medium text-slate-200">Edit Page</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={undo}
+            disabled={!undoStack.length}
+            aria-label="Undo"
+            className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-800 text-lg text-slate-200 active:bg-slate-700 disabled:opacity-30"
+          >
+            ↶
+          </button>
+          <button
+            onClick={redo}
+            disabled={!redoStack.length}
+            aria-label="Redo"
+            className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-800 text-lg text-slate-200 active:bg-slate-700 disabled:opacity-30"
+          >
+            ↷
+          </button>
+        </div>
         <button onClick={handleSave} className="rounded-lg bg-indigo-600 px-4 py-1.5 text-sm font-semibold text-white active:bg-indigo-700">
           Save
         </button>
@@ -298,8 +349,13 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
                   interactive={tool === 'select'}
                   selected={selectedId === ann.id}
                   onSelect={() => setSelectedId(ann.id)}
-                  onEditText={() => ann.type === 'text' && setEditingTextId(ann.id)}
+                  onEditText={() => {
+                    if (ann.type !== 'text') return
+                    pushUndo()
+                    setEditingTextId(ann.id)
+                  }}
                   onChange={(patch) => updateAnnotation(ann.id, patch)}
+                  onGestureStart={pushUndo}
                 />
               ))}
           </div>
@@ -407,6 +463,7 @@ function AnnotationBox({
   onSelect,
   onEditText,
   onChange,
+  onGestureStart,
 }: {
   ann: AnnotationText | AnnotationImage | AnnotationRect
   containerRef: React.RefObject<HTMLDivElement | null>
@@ -415,9 +472,14 @@ function AnnotationBox({
   onSelect: () => void
   onEditText: () => void
   onChange: (patch: Partial<Annotation>) => void
+  onGestureStart: () => void
 }) {
   const dragStart = useRef<{ px: number; py: number; xPct: number; yPct: number } | null>(null)
   const resizeStart = useRef<{ px: number; startW: number; startH: number } | null>(null)
+  // A drag/resize spans many pointermove events but should count as ONE undo step — snapshot
+  // lazily on the first real movement of a gesture, not on every pointerdown (a plain tap-to-select
+  // shouldn't push a no-op undo entry) or every move (that would flood the undo stack).
+  const gestureSnapshotted = useRef(false)
 
   function onDown(e: React.PointerEvent) {
     if (!interactive) return
@@ -425,10 +487,15 @@ function AnnotationBox({
     onSelect()
     ;(e.target as Element).setPointerCapture(e.pointerId)
     dragStart.current = { px: e.clientX, py: e.clientY, xPct: ann.xPct, yPct: ann.yPct }
+    gestureSnapshotted.current = false
   }
 
   function onMove(e: React.PointerEvent) {
     if (!dragStart.current || !containerRef.current) return
+    if (!gestureSnapshotted.current) {
+      onGestureStart()
+      gestureSnapshotted.current = true
+    }
     const rect = containerRef.current.getBoundingClientRect()
     const dx = (e.clientX - dragStart.current.px) / rect.width
     const dy = (e.clientY - dragStart.current.py) / rect.height
@@ -444,10 +511,15 @@ function AnnotationBox({
     if (ann.type === 'text') return
     ;(e.target as Element).setPointerCapture(e.pointerId)
     resizeStart.current = { px: e.clientX, startW: ann.wPct, startH: ann.hPct }
+    gestureSnapshotted.current = false
   }
 
   function onResizeMove(e: React.PointerEvent) {
     if (!resizeStart.current || !containerRef.current || ann.type === 'text') return
+    if (!gestureSnapshotted.current) {
+      onGestureStart()
+      gestureSnapshotted.current = true
+    }
     const rect = containerRef.current.getBoundingClientRect()
     const dx = (e.clientX - resizeStart.current.px) / rect.width
     const scale = Math.max(0.15, (resizeStart.current.startW + dx) / resizeStart.current.startW)
