@@ -41,6 +41,12 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
   const [textColor, setTextColor] = useState(TEXT_COLORS[0])
   const [editingTextId, setEditingTextId] = useState<string | null>(null)
   const [showSignaturePad, setShowSignaturePad] = useState(false)
+  // `sizePct` means "fraction of the page's rendered height" — CSS `font-size: X%` instead resolves
+  // against the *inherited* font-size, not the container, so text ended up rendering at a near-zero
+  // size that browsers then clamp to a fixed minimum (looked like text was stuck tiny, or jumped to
+  // a "real" size only once A+/A- pushed it past that floor). Track the container's real pixel
+  // height so font-size can be set in px, actually proportional to the page.
+  const [containerHeightPx, setContainerHeightPx] = useState(0)
 
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -72,6 +78,17 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageId])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect.height
+      if (height) setContainerHeightPx(height)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [base])
 
   const redrawInk = useMemo(
     () => () => {
@@ -346,6 +363,7 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
                   key={ann.id}
                   ann={ann}
                   containerRef={containerRef}
+                  containerHeightPx={containerHeightPx}
                   interactive={tool === 'select'}
                   selected={selectedId === ann.id}
                   onSelect={() => setSelectedId(ann.id)}
@@ -458,6 +476,7 @@ function ToolBtn({ icon, label, active, onClick }: { icon: string; label: string
 function AnnotationBox({
   ann,
   containerRef,
+  containerHeightPx,
   interactive,
   selected,
   onSelect,
@@ -467,6 +486,7 @@ function AnnotationBox({
 }: {
   ann: AnnotationText | AnnotationImage | AnnotationRect
   containerRef: React.RefObject<HTMLDivElement | null>
+  containerHeightPx: number
   interactive: boolean
   selected: boolean
   onSelect: () => void
@@ -545,7 +565,7 @@ function AnnotationBox({
           position: 'absolute',
           left: `${ann.xPct * 100}%`,
           top: `${ann.yPct * 100}%`,
-          fontSize: `${ann.sizePct * 100}%`,
+          fontSize: containerHeightPx ? `${ann.sizePct * containerHeightPx}px` : `${ann.sizePct * 100}%`,
           color: ann.color,
           pointerEvents: interactive ? 'auto' : 'none',
           maxWidth: '90%',
@@ -612,7 +632,7 @@ function TextEditPopup({
         onChange={(e) => onChange(e.target.value)}
         rows={2}
         placeholder="Type your text…"
-        className="w-full resize-none rounded-xl border border-slate-700 bg-slate-800 p-3 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        className="w-full resize-none rounded-xl border border-slate-700 bg-slate-800 p-3 text-base text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
       />
       <div className="mt-2 flex items-center justify-between">
         <div className="flex gap-2">

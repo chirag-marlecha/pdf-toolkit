@@ -93,7 +93,7 @@ export default function FormFillModal({ onClose }: Props) {
                     type="text"
                     value={values[f.name] ?? ''}
                     onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-base dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                   />
                 )}
                 {f.kind === 'checkbox' && (
@@ -110,7 +110,7 @@ export default function FormFillModal({ onClose }: Props) {
                   <select
                     value={values[f.name] ?? ''}
                     onChange={(e) => setValues((v) => ({ ...v, [f.name]: e.target.value }))}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-base dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                   >
                     <option value="" disabled>
                       Select…
