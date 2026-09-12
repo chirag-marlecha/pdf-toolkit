@@ -112,28 +112,33 @@ async function drawAnnotations(outDoc: PDFDocument, page: PDFPage, annotations: 
       }
     } else if (ann.type === 'image') {
       const img = ann.mime === 'image/png' ? await outDoc.embedPng(ann.bytes) : await outDoc.embedJpg(ann.bytes)
-      const { w: dispW, h: dispH } = displayedSize(nativeW, nativeH, rotation)
-      const w = ann.wPct * dispW
-      const h = ann.hPct * dispH
-      // anchor is the top-left of the image box in displayed space; find its native mapping,
-      // then the "bottom-left for drawImage" also depends on rotation.
-      const topLeft = mapPointToNative(ann.xPct, ann.yPct, nativeW, nativeH, rotation)
-      const bottomLeftForRotation = ((rotation % 360) + 360) % 360
-      let drawX = topLeft.x
-      let drawY = topLeft.y - h
-      if (bottomLeftForRotation === 90) {
-        drawX = topLeft.x
-        drawY = topLeft.y - w
-      } else if (bottomLeftForRotation === 270) {
-        drawX = topLeft.x - h
-        drawY = topLeft.y
-      } else if (bottomLeftForRotation === 180) {
-        drawX = topLeft.x - w
-        drawY = topLeft.y
-      }
-      page.drawImage(img, { x: drawX, y: drawY, width: w, height: h, rotate: degrees(rotation) })
+      const box = boxToNativeDrawRect(ann, nativeW, nativeH, rotation)
+      page.drawImage(img, { x: box.x, y: box.y, width: box.w, height: box.h, rotate: degrees(rotation) })
+    } else if (ann.type === 'rect') {
+      const box = boxToNativeDrawRect(ann, nativeW, nativeH, rotation)
+      const color = hexToRgb(ann.color)
+      page.drawRectangle({ x: box.x, y: box.y, width: box.w, height: box.h, rotate: degrees(rotation), color: rgb(color.r, color.g, color.b) })
     }
   }
+}
+
+/** Converts a displayed-space {xPct,yPct,wPct,hPct} box (top-left anchor) into pdf-lib's
+ *  bottom-left-anchored native-space draw rect, accounting for the page's rotation. */
+function boxToNativeDrawRect(
+  box: { xPct: number; yPct: number; wPct: number; hPct: number },
+  nativeW: number,
+  nativeH: number,
+  rotation: number,
+): { x: number; y: number; w: number; h: number } {
+  const { w: dispW, h: dispH } = displayedSize(nativeW, nativeH, rotation)
+  const w = box.wPct * dispW
+  const h = box.hPct * dispH
+  const topLeft = mapPointToNative(box.xPct, box.yPct, nativeW, nativeH, rotation)
+  const normalizedRotation = ((rotation % 360) + 360) % 360
+  if (normalizedRotation === 90) return { x: topLeft.x, y: topLeft.y - w, w, h }
+  if (normalizedRotation === 270) return { x: topLeft.x - h, y: topLeft.y, w, h }
+  if (normalizedRotation === 180) return { x: topLeft.x - w, y: topLeft.y, w, h }
+  return { x: topLeft.x, y: topLeft.y - h, w, h }
 }
 
 function hexToRgb(hex: string): { r: number; g: number; b: number } {

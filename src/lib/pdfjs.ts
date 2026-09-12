@@ -123,3 +123,58 @@ export async function getSourcePageCount(sourceId: string, bytes: Uint8Array): P
   const doc = await getPdfjsDoc(sourceId, bytes)
   return doc.numPages
 }
+
+export interface PageTextItem {
+  str: string
+  /** Fractions (0..1) of the *displayed* (post-rotation) page, top-left origin — same space our annotations use. */
+  xPct: number
+  yPct: number
+  wPct: number
+  hPct: number
+}
+
+/**
+ * Extracts existing text runs and their on-page bounding boxes, in the same displayed/rotated
+ * fractional space our annotations use — so the editor can let you tap existing text, cover it,
+ * and drop a replacement on top (pdf-lib has no way to actually rewrite text in place).
+ */
+export function getPageTextItems(sourceId: string, bytes: Uint8Array, pageIndex: number, extraRotation: number = 0): Promise<PageTextItem[]> {
+  return runSerialized(`${sourceId}#${pageIndex}`, async () => {
+    const doc = await getPdfjsDoc(sourceId, bytes)
+    const page = await doc.getPage(pageIndex + 1)
+    const totalRotation = (page.rotate + extraRotation + 360) % 360
+    const viewport = page.getViewport({ scale: 1, rotation: totalRotation })
+    const { items } = await page.getTextContent()
+
+    const results: PageTextItem[] = []
+    for (const item of items) {
+      if (!('str' in item) || !item.str.trim()) continue
+      const [, , , , x, y] = item.transform
+      const corners: [number, number][] = [
+        [x, y],
+        [x + item.width, y],
+        [x + item.width, y + item.height],
+        [x, y + item.height],
+      ]
+      let minX = Infinity,
+        minY = Infinity,
+        maxX = -Infinity,
+        maxY = -Infinity
+      for (const [cx, cy] of corners) {
+        const [vx, vy] = viewport.convertToViewportPoint(cx, cy)
+        if (vx < minX) minX = vx
+        if (vx > maxX) maxX = vx
+        if (vy < minY) minY = vy
+        if (vy > maxY) maxY = vy
+      }
+      results.push({
+        str: item.str,
+        xPct: minX / viewport.width,
+        yPct: minY / viewport.height,
+        wPct: (maxX - minX) / viewport.width,
+        hPct: (maxY - minY) / viewport.height,
+      })
+    }
+    return results
+  })
+}

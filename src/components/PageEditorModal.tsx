@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useWorkspace } from '../state/WorkspaceContext'
-import { renderPageToDataUrl } from '../lib/pdfjs'
+import { renderPageToDataUrl, getPageTextItems, type PageTextItem } from '../lib/pdfjs'
 import { renderImageToDataUrl } from '../lib/imageUtils'
-import type { Annotation, AnnotationImage, AnnotationText } from '../lib/types'
+import type { Annotation, AnnotationImage, AnnotationRect, AnnotationText } from '../lib/types'
 import { uid } from '../lib/types'
 import SignaturePadModal from './SignaturePadModal'
 
@@ -29,6 +29,7 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
   const { ws, pageById, setAnnotations } = useWorkspace()
   const page = pageById(pageId)
   const [base, setBase] = useState<{ url: string; width: number; height: number } | null>(null)
+  const [textItems, setTextItems] = useState<PageTextItem[]>([])
   const [annotations, setLocalAnnotations] = useState<Annotation[]>(page?.annotations ?? [])
   const [tool, setTool] = useState<Tool>('select')
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -43,6 +44,10 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const currentStroke = useRef<{ x: number; y: number }[] | null>(null)
   const drawing = useRef(false)
+  // Tracks the white "cover" box paired with a text annotation created via coverAndEditText, so
+  // that clearing the text and tapping Done (i.e. cancelling) removes the cover too, instead of
+  // leaving a blank white box silently blanking out the original text with no explanation.
+  const pendingCoverRectId = useRef<string | null>(null)
 
   useEffect(() => {
     if (!page) return
@@ -52,6 +57,8 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
         const source = ws.sources[page!.sourceId]
         const res = await renderPageToDataUrl(page!.sourceId, source.bytes, page!.pageIndex, 1000, page!.rotation)
         if (!cancelled) setBase(res)
+        const items = await getPageTextItems(page!.sourceId, source.bytes, page!.pageIndex, page!.rotation)
+        if (!cancelled) setTextItems(items)
       } else {
         const res = await renderImageToDataUrl(page!.imageBytes, page!.mime, 1000, page!.rotation)
         if (!cancelled) setBase(res)
@@ -103,11 +110,63 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
     }
   }
 
+  /** Finds the smallest existing-text bounding box under a tap, if any — pdf-lib can't rewrite
+   *  text in place, so "editing" existing text means covering it and dropping a replacement on top. */
+  function findTextItemAt(x: number, y: number): PageTextItem | null {
+    let best: PageTextItem | null = null
+    let bestArea = Infinity
+    for (const item of textItems) {
+      if (x >= item.xPct && x <= item.xPct + item.wPct && y >= item.yPct && y <= item.yPct + item.hPct) {
+        const area = item.wPct * item.hPct
+        if (area < bestArea) {
+          bestArea = area
+          best = item
+        }
+      }
+    }
+    return best
+  }
+
+  function coverAndEditText(item: PageTextItem) {
+    const pad = 0.004
+    const rectAnn: AnnotationRect = {
+      id: uid(),
+      type: 'rect',
+      xPct: Math.max(0, item.xPct - pad),
+      yPct: Math.max(0, item.yPct - pad),
+      wPct: item.wPct + pad * 2,
+      hPct: item.hPct + pad * 2,
+      color: '#ffffff',
+    }
+    const textAnn: AnnotationText = {
+      id: uid(),
+      type: 'text',
+      xPct: item.xPct,
+      yPct: item.yPct,
+      text: item.str,
+      sizePct: Math.max(0.015, item.hPct * 0.85),
+      color: textColor,
+    }
+    setLocalAnnotations((prev) => [...prev, rectAnn, textAnn])
+    pendingCoverRectId.current = rectAnn.id
+    setEditingTextId(textAnn.id)
+    setSelectedId(textAnn.id)
+  }
+
   function handleContainerDown(e: React.PointerEvent) {
+    if (tool === 'text' || tool === 'select') {
+      const { x, y } = fractionFromEvent(e)
+      const hit = findTextItemAt(x, y)
+      if (hit) {
+        coverAndEditText(hit)
+        return
+      }
+    }
     if (tool === 'text') {
       const { x, y } = fractionFromEvent(e)
       const newAnn: AnnotationText = { id: uid(), type: 'text', xPct: x, yPct: y, text: '', sizePct: 0.035, color: textColor }
       setLocalAnnotations((prev) => [...prev, newAnn])
+      pendingCoverRectId.current = null
       setEditingTextId(newAnn.id)
       setSelectedId(newAnn.id)
     } else if (tool === 'select') {
@@ -230,7 +289,7 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
               onPointerCancel={handleInkUp}
             />
             {annotations
-              .filter((a): a is AnnotationText | AnnotationImage => a.type !== 'ink')
+              .filter((a): a is AnnotationText | AnnotationImage | AnnotationRect => a.type !== 'ink')
               .map((ann) => (
                 <AnnotationBox
                   key={ann.id}
@@ -259,7 +318,11 @@ export default function PageEditorModal({ pageId, onClose }: Props) {
             setTextColor(color)
           }}
           onDone={() => {
-            if (!editingAnn.text.trim()) deleteAnnotation(editingAnn.id)
+            if (!editingAnn.text.trim()) {
+              deleteAnnotation(editingAnn.id)
+              if (pendingCoverRectId.current) deleteAnnotation(pendingCoverRectId.current)
+            }
+            pendingCoverRectId.current = null
             setEditingTextId(null)
           }}
         />
@@ -345,7 +408,7 @@ function AnnotationBox({
   onEditText,
   onChange,
 }: {
-  ann: AnnotationText | AnnotationImage
+  ann: AnnotationText | AnnotationImage | AnnotationRect
   containerRef: React.RefObject<HTMLDivElement | null>
   interactive: boolean
   selected: boolean
@@ -378,13 +441,13 @@ function AnnotationBox({
 
   function onResizeDown(e: React.PointerEvent) {
     e.stopPropagation()
-    if (ann.type !== 'image') return
+    if (ann.type === 'text') return
     ;(e.target as Element).setPointerCapture(e.pointerId)
     resizeStart.current = { px: e.clientX, startW: ann.wPct, startH: ann.hPct }
   }
 
   function onResizeMove(e: React.PointerEvent) {
-    if (!resizeStart.current || !containerRef.current || ann.type !== 'image') return
+    if (!resizeStart.current || !containerRef.current || ann.type === 'text') return
     const rect = containerRef.current.getBoundingClientRect()
     const dx = (e.clientX - resizeStart.current.px) / rect.width
     const scale = Math.max(0.15, (resizeStart.current.startW + dx) / resizeStart.current.startW)
@@ -438,7 +501,11 @@ function AnnotationBox({
       }}
       className={`cursor-move ${selected ? 'outline outline-2 outline-indigo-400' : ''}`}
     >
-      <img src={bytesToDataUrl(ann.bytes, ann.mime)} className="h-full w-full object-contain" draggable={false} />
+      {ann.type === 'image' ? (
+        <img src={bytesToDataUrl(ann.bytes, ann.mime)} className="h-full w-full object-contain" draggable={false} />
+      ) : (
+        <div className="h-full w-full" style={{ background: ann.color }} />
+      )}
       {selected && (
         <div
           onPointerDown={onResizeDown}

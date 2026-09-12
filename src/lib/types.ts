@@ -31,7 +31,18 @@ export interface AnnotationImage {
   mime: 'image/png' | 'image/jpeg'
 }
 
-export type Annotation = AnnotationText | AnnotationInk | AnnotationImage
+/** A solid-color box, used to mask over existing PDF text before placing a replacement AnnotationText on top. */
+export interface AnnotationRect {
+  id: string
+  type: 'rect'
+  xPct: number
+  yPct: number
+  wPct: number
+  hPct: number
+  color: string
+}
+
+export type Annotation = AnnotationText | AnnotationInk | AnnotationImage | AnnotationRect
 
 export interface PdfSource {
   id: string
